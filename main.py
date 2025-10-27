@@ -18,7 +18,7 @@ PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY")
 PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY")
 
 # Subscription Pricing (in Kobo - Nigerian currency)
-MONTHLY_PRICE = 700000  # ₦7,000 = 700000 kobo
+MONTHLY_PRICE = 150000  # ₦7,000 = 700000 kobo
 PLAN_NAME = "Premium Monthly"
 
 # Initialize bot
