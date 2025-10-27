@@ -197,6 +197,6 @@ This project is licensed under the MIT License - see LICENSE file for details.
 
 ---
 
-**Made with ❤️ for the Telegram community**
+**Made with Blessed Nwamoma for the Telegram community**
 
 ⭐ **Star this repo if you find it useful!**
