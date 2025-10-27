@@ -1,15 +1,32 @@
 import os
-import asyncio
+import logging
 from datetime import datetime, timedelta
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters
+)
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import requests
 
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # Bot Configuration
-API_ID = os.getenv("API_ID")  # Get from my.telegram.org
-API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -18,22 +35,20 @@ PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY")
 PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY")
 
 # Subscription Pricing (in Kobo - Nigerian currency)
-MONTHLY_PRICE = 150000  # ₦7,000 = 700000 kobo
+MONTHLY_PRICE = 700000  # ₦7,000
 PLAN_NAME = "Premium Monthly"
 
-# Initialize bot
-app = Client("forwarder_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Conversation states
+SOURCE_CHAT, DEST_CHAT = range(2)
 
-# Database connection
+# Database functions
 def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
-# Initialize database tables
 def init_db():
     conn = get_db()
     cur = conn.cursor()
     
-    # Users table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -46,7 +61,6 @@ def init_db():
         )
     """)
     
-    # Forwarding rules table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS forwarding_rules (
             id SERIAL PRIMARY KEY,
@@ -61,7 +75,6 @@ def init_db():
         )
     """)
     
-    # Payment transactions table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id SERIAL PRIMARY KEY,
@@ -77,7 +90,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Check if user exists, create if not
 def get_or_create_user(user_id, username):
     conn = get_db()
     cur = conn.cursor()
@@ -96,7 +108,6 @@ def get_or_create_user(user_id, username):
     conn.close()
     return user
 
-# Reset daily message count
 def reset_daily_limit(user_id):
     conn = get_db()
     cur = conn.cursor()
@@ -107,7 +118,6 @@ def reset_daily_limit(user_id):
     conn.commit()
     conn.close()
 
-# Check and update message limit
 def check_message_limit(user_id):
     conn = get_db()
     cur = conn.cursor()
@@ -115,22 +125,18 @@ def check_message_limit(user_id):
     cur.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
     user = cur.fetchone()
     
-    # Check if 24 hours passed, reset counter
     if user['last_reset'] and (datetime.now() - user['last_reset']).days >= 1:
         reset_daily_limit(user_id)
         user['daily_messages'] = 0
     
-    # Premium users have unlimited
     if user['is_premium'] and user['subscription_end'] and user['subscription_end'] > datetime.now():
         conn.close()
         return True
     
-    # Free users: 50/day limit
     if user['daily_messages'] >= 50:
         conn.close()
         return False
     
-    # Increment counter
     cur.execute(
         "UPDATE users SET daily_messages = daily_messages + 1 WHERE user_id = %s",
         (user_id,)
@@ -139,8 +145,7 @@ def check_message_limit(user_id):
     conn.close()
     return True
 
-# Generate Paystack payment link
-def generate_payment_link(user_id, email):
+def generate_payment_link(user_id, email, bot_username):
     url = "https://api.paystack.co/transaction/initialize"
     headers = {
         "Authorization": f"Bearer {PAYSTACK_SECRET_KEY}",
@@ -153,7 +158,7 @@ def generate_payment_link(user_id, email):
         "email": email,
         "amount": MONTHLY_PRICE,
         "reference": reference,
-        "callback_url": f"https://t.me/{app.username}",
+        "callback_url": f"https://t.me/{bot_username}",
         "metadata": {
             "user_id": user_id,
             "plan": PLAN_NAME
@@ -165,7 +170,6 @@ def generate_payment_link(user_id, email):
     if response.status_code == 200:
         result = response.json()
         
-        # Save transaction
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
@@ -179,7 +183,6 @@ def generate_payment_link(user_id, email):
     
     return None, None
 
-# Verify payment
 def verify_payment(reference):
     url = f"https://api.paystack.co/transaction/verify/{reference}"
     headers = {"Authorization": f"Bearer {PAYSTACK_SECRET_KEY}"}
@@ -193,7 +196,6 @@ def verify_payment(reference):
     
     return False, None
 
-# Activate premium subscription
 def activate_premium(user_id):
     conn = get_db()
     cur = conn.cursor()
@@ -209,11 +211,9 @@ def activate_premium(user_id):
     conn.commit()
     conn.close()
 
-# Bot Commands
-
-@app.on_message(filters.command("start"))
-async def start_command(client, message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username)
+# Command Handlers
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_or_create_user(update.effective_user.id, update.effective_user.username)
     
     welcome_text = f"""
 🚀 **Welcome to Auto Forwarder Bot!**
@@ -221,20 +221,20 @@ async def start_command(client, message):
 **How it works:**
 1. Add me as admin to your source channel/group
 2. Add me as admin to your destination channel/group
-3. Use /add_forward to create forwarding rule
+3. Use /add\_forward to create forwarding rule
 4. Messages will auto-forward! 🔥
 
 **Your Plan:** {"✨ Premium" if user['is_premium'] else "🆓 Free (50 msgs/day)"}
 **Today's Messages:** {user['daily_messages']}/50
 
 **Commands:**
-/add_forward - Create new forwarding rule
-/my_forwards - View your active forwards
-/delete_forward - Remove a forwarding rule
+/add\_forward - Create new forwarding rule
+/my\_forwards - View your active forwards
+/delete\_forward - Remove a forwarding rule
 /subscribe - Upgrade to Premium
 /help - Get help
 
-💎 **Premium Benefits ($7/month):**
+💎 **Premium Benefits (₦7,000/month):**
 ✅ Unlimited forwarding rules
 ✅ Unlimited messages
 ✅ No daily limits
@@ -247,15 +247,14 @@ async def start_command(client, message):
         [InlineKeyboardButton("💎 Upgrade to Premium", callback_data="subscribe")]
     ])
     
-    await message.reply_text(welcome_text, reply_markup=keyboard)
+    await update.message.reply_text(welcome_text, reply_markup=keyboard, parse_mode='Markdown')
 
-@app.on_message(filters.command("subscribe"))
-async def subscribe_command(client, message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username)
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_or_create_user(update.effective_user.id, update.effective_user.username)
     
     if user['is_premium'] and user['subscription_end'] and user['subscription_end'] > datetime.now():
         remaining = (user['subscription_end'] - datetime.now()).days
-        await message.reply_text(f"✨ You're already Premium! {remaining} days remaining.")
+        await update.message.reply_text(f"✨ You're already Premium! {remaining} days remaining.")
         return
     
     subscribe_text = """
@@ -269,64 +268,63 @@ async def subscribe_command(client, message):
 ✅ Priority support
 
 **To subscribe:**
-Click the button below to pay with Paystack.
-After payment, send me your email used for payment with:
-/verify your@email.com
+Click the button below and send your email, or use:
+/pay your@email.com
     """
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Pay with Paystack", callback_data="pay_now")]
+        [InlineKeyboardButton("💳 Start Payment", callback_data="pay_now")]
     ])
     
-    await message.reply_text(subscribe_text, reply_markup=keyboard)
+    await update.message.reply_text(subscribe_text, reply_markup=keyboard, parse_mode='Markdown')
 
-@app.on_callback_query(filters.regex("pay_now"))
-async def pay_now_callback(client, callback_query):
-    await callback_query.message.reply_text(
+async def pay_now_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(
         "Please send your email address for payment:\n\n"
         "Example: /pay youremail@gmail.com"
     )
 
-@app.on_message(filters.command("pay"))
-async def pay_command(client, message):
-    if len(message.command) < 2:
-        await message.reply_text("❌ Please provide your email:\n/pay youremail@gmail.com")
+async def pay_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text("❌ Please provide your email:\n/pay youremail@gmail.com")
         return
     
-    email = message.command[1]
+    email = context.args[0]
+    bot = await context.bot.get_me()
     
-    payment_url, reference = generate_payment_link(message.from_user.id, email)
+    payment_url, reference = generate_payment_link(update.effective_user.id, email, bot.username)
     
     if payment_url:
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💳 Pay Now (₦7,000)", url=payment_url)]
         ])
         
-        await message.reply_text(
+        await update.message.reply_text(
             f"✅ **Payment Link Generated!**\n\n"
             f"Amount: ₦7,000\n"
             f"Reference: `{reference}`\n\n"
             f"After payment, use:\n"
             f"/verify {reference}",
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode='Markdown'
         )
     else:
-        await message.reply_text("❌ Failed to generate payment link. Try again.")
+        await update.message.reply_text("❌ Failed to generate payment link. Try again.")
 
-@app.on_message(filters.command("verify"))
-async def verify_command(client, message):
-    if len(message.command) < 2:
-        await message.reply_text("❌ Please provide payment reference:\n/verify SUB_xxxxx")
+async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text("❌ Please provide payment reference:\n/verify SUB_xxxxx")
         return
     
-    reference = message.command[1]
+    reference = context.args[0]
     
     success, user_id = verify_payment(reference)
     
-    if success and str(user_id) == str(message.from_user.id):
-        activate_premium(message.from_user.id)
+    if success and str(user_id) == str(update.effective_user.id):
+        activate_premium(update.effective_user.id)
         
-        # Update transaction status
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
@@ -336,70 +334,245 @@ async def verify_command(client, message):
         conn.commit()
         conn.close()
         
-        await message.reply_text(
+        await update.message.reply_text(
             "🎉 **Payment Successful!**\n\n"
             "✨ You're now Premium for 30 days!\n"
-            "Enjoy unlimited forwarding! 🚀"
+            "Enjoy unlimited forwarding! 🚀",
+            parse_mode='Markdown'
         )
     else:
-        await message.reply_text("❌ Payment verification failed. Contact support.")
+        await update.message.reply_text("❌ Payment verification failed. Contact support.")
 
-@app.on_message(filters.command("add_forward"))
-async def add_forward_command(client, message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username)
+# Conversation handler for adding forward rules
+async def add_forward_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_or_create_user(update.effective_user.id, update.effective_user.username)
     
-    # Check rule limit for free users
     if not user['is_premium']:
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
             "SELECT COUNT(*) as count FROM forwarding_rules WHERE user_id = %s AND is_active = TRUE",
-            (message.from_user.id,)
+            (update.effective_user.id,)
         )
         count = cur.fetchone()['count']
         conn.close()
         
         if count >= 1:
-            await message.reply_text(
+            await update.message.reply_text(
                 "⚠️ Free plan allows only 1 forwarding rule.\n"
                 "Upgrade to Premium for unlimited rules!\n\n"
                 "/subscribe"
             )
-            return
+            return ConversationHandler.END
     
-    await message.reply_text(
-        "📝 **Add Forwarding Rule**\n\n"
-        "1. Add me as admin to SOURCE channel/group\n"
-        "2. Add me as admin to DESTINATION channel/group\n"
-        "3. Send source channel username or ID\n\n"
-        "Example: @mynewschannel or -1001234567890"
+    await update.message.reply_text(
+        "📝 **Add Forwarding Rule - Step 1/2**\n\n"
+        "Send me the SOURCE chat username or ID where messages come FROM:\n\n"
+        "Examples:\n"
+        "• @mynewschannel\n"
+        "• -1001234567890\n\n"
+        "Or forward any message from that chat.\n\n"
+        "Send /cancel to abort.",
+        parse_mode='Markdown'
     )
+    
+    return SOURCE_CHAT
 
-@app.on_message(filters.command("my_forwards"))
-async def my_forwards_command(client, message):
+async def source_chat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    source_input = update.message.text.strip()
+    
+    # Try to get chat info
+    try:
+        if source_input.startswith('@'):
+            chat = await context.bot.get_chat(source_input)
+        elif source_input.lstrip('-').isdigit():
+            chat = await context.bot.get_chat(int(source_input))
+        elif update.message.forward_from_chat:
+            chat = update.message.forward_from_chat
+        else:
+            await update.message.reply_text(
+                "❌ Invalid format. Please send:\n"
+                "• Channel username (@channel)\n"
+                "• Chat ID (-1001234567890)\n"
+                "• Or forward a message from the chat"
+            )
+            return SOURCE_CHAT
+        
+        # Check if bot is admin
+        try:
+            member = await context.bot.get_chat_member(chat.id, context.bot.id)
+            if member.status not in ['administrator', 'creator']:
+                await update.message.reply_text(
+                    f"❌ I'm not an admin in **{chat.title}**\n\n"
+                    f"Please add me as admin with:\n"
+                    f"• Post messages permission\n"
+                    f"• Manage messages permission",
+                    parse_mode='Markdown'
+                )
+                return SOURCE_CHAT
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Cannot access chat. Make sure I'm added as admin.\n\nError: {str(e)}"
+            )
+            return SOURCE_CHAT
+        
+        # Store source chat info
+        context.user_data['source_chat_id'] = chat.id
+        context.user_data['source_chat_title'] = chat.title or chat.first_name or str(chat.id)
+        
+        await update.message.reply_text(
+            f"✅ Source chat: **{context.user_data['source_chat_title']}**\n\n"
+            f"📝 **Step 2/2**\n\n"
+            f"Now send me the DESTINATION chat where messages go TO:\n\n"
+            f"Examples:\n"
+            f"• @mydestchannel\n"
+            f"• -1001234567890\n\n"
+            f"Send /cancel to abort.",
+            parse_mode='Markdown'
+        )
+        
+        return DEST_CHAT
+        
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error: {str(e)}\n\nPlease try again with valid chat username or ID."
+        )
+        return SOURCE_CHAT
+
+async def dest_chat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    dest_input = update.message.text.strip()
+    
+    try:
+        if dest_input.startswith('@'):
+            chat = await context.bot.get_chat(dest_input)
+        elif dest_input.lstrip('-').isdigit():
+            chat = await context.bot.get_chat(int(dest_input))
+        elif update.message.forward_from_chat:
+            chat = update.message.forward_from_chat
+        else:
+            await update.message.reply_text(
+                "❌ Invalid format. Please send:\n"
+                "• Channel username (@channel)\n"
+                "• Chat ID (-1001234567890)\n"
+                "• Or forward a message from the chat"
+            )
+            return DEST_CHAT
+        
+        # Check if bot is admin
+        try:
+            member = await context.bot.get_chat_member(chat.id, context.bot.id)
+            if member.status not in ['administrator', 'creator']:
+                await update.message.reply_text(
+                    f"❌ I'm not an admin in **{chat.title}**\n\n"
+                    f"Please add me as admin with post messages permission.",
+                    parse_mode='Markdown'
+                )
+                return DEST_CHAT
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Cannot access chat. Make sure I'm added as admin.\n\nError: {str(e)}"
+            )
+            return DEST_CHAT
+        
+        dest_chat_id = chat.id
+        dest_chat_title = chat.title or chat.first_name or str(chat.id)
+        
+        # Save forwarding rule
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO forwarding_rules 
+               (user_id, source_chat_id, source_chat_title, dest_chat_id, dest_chat_title)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (update.effective_user.id, context.user_data['source_chat_id'],
+             context.user_data['source_chat_title'], dest_chat_id, dest_chat_title)
+        )
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(
+            f"✅ **Forwarding Rule Created!**\n\n"
+            f"📥 From: {context.user_data['source_chat_title']}\n"
+            f"📤 To: {dest_chat_title}\n\n"
+            f"Messages will now auto-forward! 🚀",
+            parse_mode='Markdown'
+        )
+        
+        # Clear user data
+        context.user_data.clear()
+        return ConversationHandler.END
+        
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error: {str(e)}\n\nPlease try again with valid chat username or ID."
+        )
+        return DEST_CHAT
+
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Operation cancelled.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def my_forwards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM forwarding_rules WHERE user_id = %s AND is_active = TRUE",
-        (message.from_user.id,)
+        (update.effective_user.id,)
     )
     rules = cur.fetchall()
     conn.close()
     
     if not rules:
-        await message.reply_text("📭 You have no active forwarding rules.\n\nUse /add_forward to create one!")
+        await update.message.reply_text(
+            "📭 You have no active forwarding rules.\n\nUse /add_forward to create one!"
+        )
         return
     
     text = "📋 **Your Active Forwards:**\n\n"
     for idx, rule in enumerate(rules, 1):
-        text += f"{idx}. {rule['source_chat_title']} → {rule['dest_chat_title']}\n"
+        text += f"{idx}. `{rule['id']}`: {rule['source_chat_title']} → {rule['dest_chat_title']}\n"
     
-    await message.reply_text(text)
+    text += "\n💡 Use /delete\\_forward ID to remove a rule"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
 
-# Message forwarder (this runs for every message in channels where bot is admin)
-@app.on_message(filters.channel | filters.group)
-async def forward_message(client, message):
-    # Get forwarding rules for this source chat
+async def delete_forward_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 1:
+        await update.message.reply_text(
+            "❌ Please provide the rule ID:\n/delete_forward ID\n\n"
+            "Use /my_forwards to see your rules and their IDs."
+        )
+        return
+    
+    try:
+        rule_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Invalid ID. Please provide a number.")
+        return
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE forwarding_rules SET is_active = FALSE WHERE id = %s AND user_id = %s",
+        (rule_id, update.effective_user.id)
+    )
+    
+    if cur.rowcount > 0:
+        conn.commit()
+        await update.message.reply_text(f"✅ Forwarding rule {rule_id} deleted!")
+    else:
+        await update.message.reply_text("❌ Rule not found or you don't own it.")
+    
+    conn.close()
+
+# Message forwarder
+async def forward_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.channel_post and not update.message:
+        return
+    
+    message = update.channel_post or update.message
+    
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
@@ -410,11 +583,9 @@ async def forward_message(client, message):
     conn.close()
     
     for rule in rules:
-        # Check message limit
         if not check_message_limit(rule['user_id']):
-            # Notify user about limit (only once per day)
             try:
-                await client.send_message(
+                await context.bot.send_message(
                     rule['user_id'],
                     "⚠️ Daily limit reached (50 messages)!\n"
                     "Upgrade to Premium for unlimited forwarding:\n"
@@ -424,39 +595,84 @@ async def forward_message(client, message):
                 pass
             continue
         
-        # Forward the message
         try:
             await message.forward(rule['dest_chat_id'])
         except Exception as e:
-            print(f"Forward error: {e}")
+            logger.error(f"Forward error: {e}")
 
-@app.on_message(filters.command("help"))
-async def help_command(client, message):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 📚 **Help & Support**
 
 **Setup Steps:**
 1. Add bot as admin to source channel
 2. Add bot as admin to destination channel
-3. Use /add_forward to link them
+3. Use /add\_forward to link them
 4. Done! Messages auto-forward
 
 **Commands:**
 /start - Start bot
-/add_forward - Create forwarding rule
-/my_forwards - View active forwards
-/delete_forward - Remove forward rule
+/add\_forward - Create forwarding rule
+/my\_forwards - View active forwards
+/delete\_forward ID - Remove forward rule
 /subscribe - Upgrade to premium
+/pay email - Generate payment link
+/verify REF - Verify payment
 /help - This message
 
 **Need help?** Contact: @YourSupportUsername
     """
-    await message.reply_text(help_text)
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
-# Run bot
-if __name__ == "__main__":
-    print("🚀 Bot starting...")
+# Callback query handlers
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "add_forward":
+        await add_forward_start(query.message, context)
+    elif query.data == "my_forwards":
+        await my_forwards_command(query.message, context)
+    elif query.data == "subscribe":
+        await subscribe_command(query.message, context)
+
+# Main function
+def main():
+    print("🚀 Initializing bot...")
     init_db()
     print("✅ Database initialized")
-    app.run()
-    print("✅ Bot running!")
+    
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Conversation handler for adding forwards
+    add_forward_conv = ConversationHandler(
+        entry_points=[CommandHandler('add_forward', add_forward_start)],
+        states={
+            SOURCE_CHAT: [MessageHandler(filters.TEXT | filters.FORWARDED, source_chat_received)],
+            DEST_CHAT: [MessageHandler(filters.TEXT | filters.FORWARDED, dest_chat_received)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_conversation)],
+    )
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("subscribe", subscribe_command))
+    application.add_handler(CommandHandler("pay", pay_command))
+    application.add_handler(CommandHandler("verify", verify_command))
+    application.add_handler(CommandHandler("my_forwards", my_forwards_command))
+    application.add_handler(CommandHandler("delete_forward", delete_forward_command))
+    application.add_handler(add_forward_conv)
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Message forwarder (must be last)
+    application.add_handler(MessageHandler(
+        filters.Chat(chat_id=[]) | filters.ALL,  # Will match all chats
+        forward_message_handler
+    ), group=1)
+    
+    print("✅ Bot started successfully!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
