@@ -522,8 +522,33 @@ async def source_chat_received(update: Update, context: ContextTypes.DEFAULT_TYP
     source_input = update.message.text.strip() if update.message.text else None
     
     try:
-        if update.message.forward_from_chat:
-            chat = update.message.forward_from_chat
+        # Check if message is forwarded (new method)
+        if update.message.forward_origin:
+            # Handle forwarded messages based on origin type
+            forward_origin = update.message.forward_origin
+            
+            if forward_origin.type == "channel":
+                chat = forward_origin.chat
+            elif forward_origin.type == "chat":
+                # For group/supergroup forwards
+                chat_id = forward_origin.sender_chat.id if hasattr(forward_origin, 'sender_chat') else None
+                if chat_id:
+                    chat = await context.bot.get_chat(chat_id)
+                else:
+                    await update.message.reply_text(
+                        "Cannot determine source chat from this forward.\n\n"
+                        "Please send the chat username or ID instead."
+                    )
+                    return SOURCE_CHAT
+            else:
+                await update.message.reply_text(
+                    "This forward type is not supported.\n\n"
+                    "Please send:\n"
+                    "- Channel username: @channel\n"
+                    "- Chat ID: -1001234567890"
+                )
+                return SOURCE_CHAT
+                
         elif source_input and source_input.startswith('@'):
             chat = await context.bot.get_chat(source_input)
         elif source_input and source_input.lstrip('-').isdigit():
@@ -538,6 +563,7 @@ async def source_chat_received(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return SOURCE_CHAT
         
+        # Check bot permissions
         try:
             member = await context.bot.get_chat_member(chat.id, context.bot.id)
             if member.status not in ['administrator', 'creator']:
@@ -561,13 +587,15 @@ async def source_chat_received(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data['source_chat_title'] = chat.title or chat.first_name or str(chat.id)
         
         await update.message.reply_text(
-            f"Source Chat Set\n\n"
-            f"From: {context.user_data['source_chat_title']}\n\n"
+            f"✅ Source Chat Set\n\n"
+            f"From: {context.user_data['source_chat_title']}\n"
+            f"ID: {chat.id}\n\n"
             f"Step 2/2\n\n"
             f"Now send the DESTINATION chat (where messages go TO):\n\n"
             f"Options:\n"
             f"- Channel username: @mydestchannel\n"
-            f"- Chat ID: -1001234567890\n\n"
+            f"- Chat ID: -1001234567890\n"
+            f"- Forward a message from destination\n\n"
             f"Send /cancel to abort."
         )
         
@@ -582,12 +610,36 @@ async def source_chat_received(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return SOURCE_CHAT
 
+
 async def dest_chat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dest_input = update.message.text.strip() if update.message.text else None
     
     try:
-        if update.message.forward_from_chat:
-            chat = update.message.forward_from_chat
+        # Check if message is forwarded (new method)
+        if update.message.forward_origin:
+            forward_origin = update.message.forward_origin
+            
+            if forward_origin.type == "channel":
+                chat = forward_origin.chat
+            elif forward_origin.type == "chat":
+                chat_id = forward_origin.sender_chat.id if hasattr(forward_origin, 'sender_chat') else None
+                if chat_id:
+                    chat = await context.bot.get_chat(chat_id)
+                else:
+                    await update.message.reply_text(
+                        "Cannot determine destination chat from this forward.\n\n"
+                        "Please send the chat username or ID instead."
+                    )
+                    return DEST_CHAT
+            else:
+                await update.message.reply_text(
+                    "This forward type is not supported.\n\n"
+                    "Please send:\n"
+                    "- Channel username: @channel\n"
+                    "- Chat ID: -1001234567890"
+                )
+                return DEST_CHAT
+                
         elif dest_input and dest_input.startswith('@'):
             chat = await context.bot.get_chat(dest_input)
         elif dest_input and dest_input.lstrip('-').isdigit():
@@ -602,6 +654,7 @@ async def dest_chat_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return DEST_CHAT
         
+        # Check bot permissions
         try:
             member = await context.bot.get_chat_member(chat.id, context.bot.id)
             if member.status not in ['administrator', 'creator']:
@@ -618,6 +671,44 @@ async def dest_chat_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Error: {str(e)}"
             )
             return DEST_CHAT
+        
+        dest_chat_id = chat.id
+        dest_chat_title = chat.title or chat.first_name or str(chat.id)
+        
+        # Create the forwarding rule
+        rule_id = f"rule_{int(datetime.now().timestamp())}_{update.effective_user.id}"
+        rules_data[rule_id] = {
+            'user_id': str(update.effective_user.id),
+            'source_chat_id': context.user_data['source_chat_id'],
+            'source_chat_title': context.user_data['source_chat_title'],
+            'dest_chat_id': dest_chat_id,
+            'dest_chat_title': dest_chat_title,
+            'is_active': True,
+            'messages_forwarded': 0,
+            'created_at': datetime.now()
+        }
+        save_data()
+        
+        await update.message.reply_text(
+            f"✅ Forwarding Rule Created!\n\n"
+            f"📤 From: {context.user_data['source_chat_title']}\n"
+            f"📥 To: {dest_chat_title}\n"
+            f"🆔 Rule ID: {rule_id}\n\n"
+            f"✨ Messages will now auto-forward!\n\n"
+            f"Use /my_forwards to view all rules."
+        )
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logger.error(f"Error in dest_chat_received: {e}")
+        await update.message.reply_text(
+            f"Error\n\n"
+            f"{str(e)}\n\n"
+            f"Please try again with valid chat username or ID."
+        )
+        return DEST_CHAT
         
         dest_chat_id = chat.id
         dest_chat_title = chat.title or chat.first_name or str(chat.id)
