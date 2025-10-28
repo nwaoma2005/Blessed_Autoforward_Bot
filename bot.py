@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Bot Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Should be your Render URL
-PORT = int(os.getenv("PORT", 10000))  # Render uses dynamic PORT
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", 10000))
 
 # Paystack Configuration
 PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY")
@@ -237,7 +237,6 @@ def generate_payment_link(user_id, email, bot_username, plan_type='monthly'):
         "Content-Type": "application/json"
     }
     
-    # Determine amount and plan name based on plan type
     if plan_type == 'daily':
         amount = DAILY_PRICE
         plan_name = PLAN_NAME_DAILY
@@ -306,10 +305,9 @@ def activate_premium(user_id, plan_type='monthly'):
     user_id = str(user_id)
     
     if user_id in users_data:
-        # Calculate subscription end based on plan type
         if plan_type == 'daily':
             subscription_end = datetime.now() + timedelta(days=1)
-        else:  # monthly
+        else:
             subscription_end = datetime.now() + timedelta(days=30)
             
         users_data[user_id]['is_premium'] = True
@@ -332,9 +330,7 @@ def get_user_rules(user_id):
     for rule_id, rule in rules_data.items():
         if rule['user_id'] == user_id and rule['is_active']:
             user_rules.append({**rule, 'rule_id': rule_id})
-    return user_rules
-
-# ==================== COMMAND HANDLERS ====================
+    return user_rules# ==================== COMMAND HANDLERS ====================
 
 @rate_limit
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -478,7 +474,7 @@ async def pay_command_helper(update: Update, context: ContextTypes.DEFAULT_TYPE,
     )
     
     if payment_url:
-        amount_naira = amount / 100  # Convert kobo to naira
+        amount_naira = amount / 100
         plan_text = "Monthly" if plan_type == 'monthly' else "Daily"
         duration = "30 days" if plan_type == 'monthly' else "24 hours"
         
@@ -523,7 +519,6 @@ async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success, user_id = verify_payment(reference)
     
     if success and str(user_id) == str(update.effective_user.id):
-        # Get plan type from transaction data
         plan_type = transactions_data.get(reference, {}).get('plan_type', 'monthly')
         activate_premium(update.effective_user.id, plan_type)
         
@@ -642,7 +637,6 @@ async def source_chat_received(update: Update, context: ContextTypes.DEFAULT_TYP
         
         return DEST_CHAT
         
-    
     except Exception as e:
         logger.error(f"Error in source_chat_received: {e}")
         await update.message.reply_text(
@@ -734,6 +728,8 @@ async def dest_chat_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return DEST_CHAT
 
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel conversation"""
+    await update.message.reply_text("❌async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel conversation"""
     await update.message.reply_text("❌ Operation cancelled.")
     context.user_data.clear()
@@ -927,6 +923,59 @@ async def forward_message_handler(update: Update, context: ContextTypes.DEFAULT_
                 except:
                     pass
 
+# ==================== CALLBACK QUERY HANDLERS ====================
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline button callbacks"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "add_forward":
+        update.message = query.message
+        await add_forward_start(update, context)
+    
+    elif query.data == "my_forwards":
+        update.message = query.message
+        await my_forwards_command(update, context)
+    
+    elif query.data == "subscribe":
+        update.message = query.message
+        await subscribe_command(update, context)
+    
+    elif query.data in ["pay_monthly", "pay_daily"]:
+        await pay_now_callback(update, context)
+    
+    elif query.data.startswith("verify_"):
+        reference = query.data.replace("verify_", "")
+        await query.message.reply_text("🔄 Verifying payment...")
+        
+        success, user_id = verify_payment(reference)
+        
+        if success and str(user_id) == str(query.from_user.id):
+            plan_type = transactions_data.get(reference, {}).get('plan_type', 'monthly')
+            activate_premium(query.from_user.id, plan_type)
+            
+            if reference in transactions_data:
+                transactions_data[reference]['status'] = 'success'
+                transactions_data[reference]['payment_date'] = datetime.now()
+                save_data()
+            
+            duration = "30 days" if plan_type == 'monthly' else "24 hours"
+            
+            await query.message.reply_text(
+                f"🎉 **Payment Successful!**\n\n"
+                f"✨ You're now **Premium** for {duration}!\n"
+                f"💫 Enjoy unlimited forwarding!\n\n"
+                f"Use /add\_forward to create rules! 🚀",
+                parse_mode='Markdown'
+            )
+        else:
+            await query.message.reply_text(
+                "❌ **Payment Verification Failed**\n\n"
+                "Payment not confirmed yet or invalid.\n\n"
+                "Please wait a moment and try again."
+            )
+
 # ==================== ADMIN COMMANDS ====================
 
 async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1032,5 +1081,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
         save_data()
-```
-
