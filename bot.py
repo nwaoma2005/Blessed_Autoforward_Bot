@@ -206,6 +206,13 @@ def health_check():
         'bot_running': bot_app is not None
     }), 200
 
+def escape_markdown(text):
+    """Escape special characters for MarkdownV2"""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 def rate_limit(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -395,7 +402,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     premium_status = "✨ Premium" if user['is_premium'] else "🆓 Free"
     
     welcome_text = (
-        "🚀 *Welcome to Auto Forwarder Bot!*\n\n"
+        "🚀 *Welcome to Auto Forwarder Bot\\!*\n\n"
         "📋 *How it works:*\n"
         "1️⃣ Add me as admin to source channel\n"
         "2️⃣ Add me as admin to destination channel\n"
